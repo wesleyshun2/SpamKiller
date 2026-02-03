@@ -40,3 +40,5 @@ npx wrangler deploy
   - `threshold`: 封鎖門檻 (預設 3)
   - `appeal`: 申訴管道說明
   - `stats_channel`: 統計資料接收頻道 ID
+  - `dry_run`: 演習模式 (true/false)。開啟時不執行刪除與封鎖。
+  - `observation_channel`: 演習模式下的通知與轉發頻道 ID。

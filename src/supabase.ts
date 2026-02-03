@@ -31,6 +31,8 @@ export class DatabaseService {
       punishment_threshold: Number(config.punishment_threshold || 3),
       appeal_channel: config.appeal_channel || '請私訊管理員',
       stats_channel_id: config.stats_channel_id || null,
+      dry_run: config.dry_run === true || config.dry_run === 'true',
+      observation_channel_id: config.observation_channel_id || null,
     };
   }
 

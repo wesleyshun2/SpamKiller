@@ -48,7 +48,7 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService) 
 
       // 紀錄違規並檢查是否需剔除 (手動舉報也算違規)
       if (replyTo.from) {
-        await handleSpamAction(ctx, db, env, replyTo.from.id, replyTo.message_id);
+        await handleSpamAction(ctx, db, env, replyTo.from.id, replyTo.message_id, '管理員手動舉報 (/spam)');
       }
 
       // 刪除管理員的指令訊息
@@ -67,9 +67,10 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService) 
 
     const args = ctx.message.text.split(' ');
     if (args.length < 3) {
-      await ctx.reply('用法: /config [threshold|appeal|stats_channel] [值]\n' +
-                      '例如: /config threshold 5\n' +
-                      '例如: /config appeal 請連繫 @admin');
+      await ctx.reply('用法: /config [key] [值]\n' +
+                      '可用 key: threshold, appeal, stats_channel, dry_run, observation_channel\n' +
+                      '例如: /config dry_run true\n' +
+                      '例如: /config observation_channel -100123456789');
       return;
     }
 
@@ -82,6 +83,10 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService) 
       await db.updateConfig('appeal_channel', value);
     } else if (key === 'stats_channel') {
       await db.updateConfig('stats_channel_id', value);
+    } else if (key === 'dry_run') {
+      await db.updateConfig('dry_run', value === 'true');
+    } else if (key === 'observation_channel') {
+      await db.updateConfig('observation_channel_id', value);
     }
 
     await ctx.reply(`配置 ${key} 已更新為 ${value}`);
@@ -117,7 +122,8 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService) 
     }
 
     if (isSpam) {
-      await handleSpamAction(ctx, db, env, userId, msg.message_id);
+      const reason = match ? `向量比對命中 (ID: ${match.id}, 相似度: ${match.similarity.toFixed(4)})` : 'Gemini 語意判定為廣告';
+      await handleSpamAction(ctx, db, env, userId, msg.message_id, reason);
     }
   });
 
@@ -130,10 +136,30 @@ async function checkAdmin(ctx: Context) {
   return ['administrator', 'creator'].includes(member.status);
 }
 
-async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, userId: number, messageId: number) {
+async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, userId: number, messageId: number, reason: string) {
   const chatId = ctx.chat!.id;
   const config = await db.getConfig();
 
+  if (config.dry_run) {
+    // 演習模式：僅記錄並通知觀察頻道
+    if (config.observation_channel_id) {
+      const report = `🚨 [演習模式] 偵測到疑似廣告\n` +
+                     `來源群組: ${chatId}\n` +
+                     `發言者: ${userId}\n` +
+                     `判定原因: ${reason}\n` +
+                     `預定處分: 刪除訊息並累計違規 (當前若執行應為第 ${(await getEstimatedCount(db, userId, chatId))} 次)`;
+
+      try {
+        await ctx.telegram.sendMessage(config.observation_channel_id, report);
+        await ctx.telegram.forwardMessage(config.observation_channel_id, chatId, messageId);
+      } catch (e) {
+        console.error('Observation report failed', e);
+      }
+    }
+    return;
+  }
+
+  // 正式模式：執行處分
   // 1. 刪除訊息
   try {
     await ctx.telegram.deleteMessage(chatId, messageId);
@@ -155,4 +181,19 @@ async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, use
       console.error('Ban failed', e);
     }
   }
+}
+
+async function getEstimatedCount(db: DatabaseService, userId: number, chatId: number): Promise<number> {
+  // 這裡只是估計值，不實際寫入資料庫
+  const { data } = await (db as any).client
+    .from('violations')
+    .select('count, last_violation')
+    .eq('user_id', userId)
+    .eq('chat_id', chatId)
+    .single();
+
+  if (!data) return 1;
+  const last = new Date(data.last_violation);
+  const diff24h = (Date.now() - last.getTime()) < 24 * 60 * 60 * 1000;
+  return diff24h ? data.count + 1 : 1;
 }

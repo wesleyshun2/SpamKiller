@@ -10,6 +10,8 @@ export interface Config {
   punishment_threshold: number;
   appeal_channel: string;
   stats_channel_id: string | null;
+  dry_run: boolean;
+  observation_channel_id: string | null;
 }
 
 export interface Violation {

@@ -41,7 +41,9 @@ create table if not exists config (
 insert into config (key, value) values
 ('punishment_threshold', '3'),
 ('appeal_channel', '"請私訊管理員"'),
-('stats_channel_id', 'null')
+('stats_channel_id', 'null'),
+('dry_run', 'false'),
+('observation_channel_id', 'null')
 on conflict (key) do nothing;
 
 -- 5. 相似度搜尋函式
