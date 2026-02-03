@@ -7,6 +7,7 @@ create table if not exists whitelist (
     username text,
     added_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+alter table whitelist enable row level security;
 
 -- 2. 廣告特徵向量表格
 create table if not exists spam_patterns (
@@ -16,6 +17,7 @@ create table if not exists spam_patterns (
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     use_count int default 1
 );
+alter table spam_patterns enable row level security;
 
 -- 建立向量索引以加速搜尋
 create index on spam_patterns using ivfflat (embedding vector_cosine_ops)
@@ -29,6 +31,7 @@ create table if not exists violations (
     last_violation timestamp with time zone default timezone('utc'::text, now()) not null,
     primary key (user_id, chat_id)
 );
+alter table violations enable row level security;
 
 -- 4. 設定表格
 create table if not exists config (
@@ -36,6 +39,7 @@ create table if not exists config (
     value jsonb,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
+alter table config enable row level security;
 
 -- 初始化預設設定
 insert into config (key, value) values
@@ -58,6 +62,8 @@ returns table (
   similarity float
 )
 language plpgsql
+security definer
+set search_path = public
 as $$
 begin
   return query
