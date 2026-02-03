@@ -1,0 +1,13 @@
+name = "tg-spam-filter-bot"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+
+[vars]
+# TG_TOKEN = "..."
+# SUPABASE_URL = "..."
+# SUPABASE_SERVICE_KEY = "..."
+# GEMINI_API_KEY = "..."
+# FORWARD_CHANNEL_ID = "..."
+
+[triggers]
+crons = ["0 0 * * *"] # 每天午夜執行統計
