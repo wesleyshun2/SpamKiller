@@ -4,7 +4,15 @@ export class GeminiService {
   private genAI: GoogleGenerativeAI;
 
   // 候選模型清單 (優先嘗試較新的)
-  private readonly textModels = ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"];
+  private readonly textModels = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite-preview-02-05", // 加入最新 2.0 Lite
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-8b",
+    "gemini-1.5-pro-latest",
+    "gemini-pro"
+  ];
   private readonly embedModels = ["text-embedding-004", "embedding-001"];
 
   private currentTextModel: string;
@@ -23,16 +31,26 @@ export class GeminiService {
   async getEmbedding(text: string): Promise<number[] | null> {
     for (const modelName of this.embedModels) {
       try {
+        // 先嘗試預設 v1beta
         const model = this.genAI.getGenerativeModel({ model: modelName });
         const result = await model.embedContent(text);
-        this.currentEmbedModel = modelName; // Update working model
+        this.currentEmbedModel = modelName;
         return result.embedding.values;
       } catch (e: any) {
-        console.warn(`Embedding failed with ${modelName}:`, e.message);
-        if (this.isPermanentError(e)) {
-          continue; // Try next model
+        if (this.isNotFoundError(e)) {
+          // 如果 404，嘗試強制使用 v1
+          try {
+            const modelV1 = this.genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
+            const result = await modelV1.embedContent(text);
+            this.currentEmbedModel = modelName;
+            return result.embedding.values;
+          } catch (e2: any) {
+            console.warn(`Embedding failed with ${modelName} on both v1beta & v1: ${e2.message}`);
+          }
         }
-        return null; // Quota or other error, stop trying
+        console.warn(`Embedding failed with ${modelName}:`, e.message);
+        if (this.isPermanentError(e)) continue;
+        return null;
       }
     }
     return null;
@@ -54,19 +72,32 @@ export class GeminiService {
         const response = await result.response;
         const prediction = response.text().trim().toUpperCase();
 
-        this.currentTextModel = modelName; // Update working model
+        this.currentTextModel = modelName;
         return prediction.includes("YES");
       } catch (e: any) {
-        console.warn(`isSpam failed with ${modelName}:`, e.message);
-        if (this.isPermanentError(e)) {
-          continue; // Try next model
+        if (this.isNotFoundError(e)) {
+          // 如果 404，嘗試強迫使用 v1 API 再次嘗試
+          try {
+            const modelV1 = this.genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
+            const result = await modelV1.generateContent(prompt);
+            const response = await result.response;
+            this.currentTextModel = modelName;
+            return response.text().trim().toUpperCase().includes("YES");
+          } catch (e2: any) {
+            console.warn(`isSpam failed with ${modelName} on both v1beta & v1: ${e2.message}`);
+          }
         }
-        // If checking explicitly for 429 or other retryable, handling might differ. 
-        // For now, if one fails with quota, likely all will.
+        console.warn(`isSpam failed with ${modelName}:`, e.message);
+        if (this.isPermanentError(e)) continue;
         return null;
       }
     }
     return null;
+  }
+
+  private isNotFoundError(e: any): boolean {
+    const msg = e.message || '';
+    return msg.includes('404') || msg.includes('not found');
   }
 
   private isPermanentError(e: any): boolean {

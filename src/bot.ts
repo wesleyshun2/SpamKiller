@@ -125,8 +125,9 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService, 
         let logChannelId = config.forward_channel_id || env.FORWARD_CHANNEL_ID;
         if (typeof logChannelId === 'string') logChannelId = logChannelId.trim();
 
-        // 修正逻辑：如果是 API Error，也必须转发
-        const shouldLog = logChannelId && (isSpam || judgmentSource.includes('API Error') || monitoredGroups.includes(currentChatId));
+        const shouldLog = !!(logChannelId && (isSpam || judgmentSource.includes('API Error') || monitoredGroups.includes(currentChatId)));
+
+        console.log(`[Logging Check] logChannelId: "${logChannelId}", shouldLog: ${shouldLog}, isSpam: ${isSpam}, source: ${judgmentSource}`);
 
         if (shouldLog && logChannelId) {
             try {

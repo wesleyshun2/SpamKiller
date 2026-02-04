@@ -1,44 +1,81 @@
-# Telegram 廣告過濾機器人 (TG Spam Filter Bot)
+# Telegram 智能廣告過濾機器人 (TG Spam Filter Bot)
 
-這是一個基於 Cloudflare Workers、Supabase 與 Google Gemini API 開發的語意化廣告過濾機器人。
+這是一個基於 **Cloudflare Workers**、**Supabase (pgvector)** 與 **Google Gemini API** 構建的生產級 Telegram 防垃圾訊息機器人。它具備企業級的可靠性設計，包含多模型自動切換、雙重 API 版本備援以及即時監控面板。
 
-## 功能特點
-- **語意判斷**：使用 Gemini Embedding 進行向量比對，並在模糊地帶使用 AI 進行最終裁定。
-- **自動學習**：管理員可透過回覆訊息並輸入 `/spam` 讓機器人學習新的廣告模式。
-- **處分機制**：自動刪除廣告、發送申訴管道資訊，並對一天內多次犯規者進行封鎖。
-- **白名單**：支援動態管理白名單。
-- **統計資料**：每日定時發送處理量與封鎖清單至指定頻道。
-- **資源優化**：自動合併相似廣告向量，節省資料庫空間。
+## 🌟 核心特色 (v2.0)
 
-## 部署說明
+### 360° 全方位防禦
+1.  **雙重判斷機制 (Dual-Layer Defense)**：
+    *   **第一層 (Vector Search)**：利用 Embedding 向量技術，毫秒級比對已知廣告庫 (相似度 > 0.85 即攔截)。
+    *   **第二層 (LLM Analysis)**：若向量庫無匹配，自動呼叫 Google Gemini 進行深層語意分析 (結合使用者 Bio 與 Context)。
+2.  **動態白名單**：優先檢查快取與白名單，降低 API 開銷並避免誤判。
+3.  **自動學習 (Auto-Learning)**：當 AI 判定為廣告時，自動將該特徵寫入向量資料庫，下次遇到類似廣告直接由第一層攔截。
+
+### 🛡️ 高可用性與強韌設計 (Robustness)
+*   **多模型自動輪詢 (Multi-Model Fallback)**：
+    *   內建「不死鳥」機制，依序嘗試 `gemini-2.0-flash`, `2.0-Lite`, `1.5-Flash`, `1.5-Pro` 等模型。
+    *   自動偵測 **429 (Quota Exceeded)** 並切換至下一個可用模型。
+*   **雙 API 版本備援**：
+    *   針對 **404 (Not Found)** 錯誤，自動在 `v1beta` 與 `v1` 穩定版 API 間切換，確保不受 Google API 改版影響。
+*   **智慧轉發與錯誤修復**：
+    *   轉發失敗時自動偵測原因 (如群組升級、權限不足) 並回傳具體修復建議。
+
+---
+
+## 🛠️ 部署說明
 
 ### 1. 資料庫設定 (Supabase)
-請在 Supabase 的 SQL Editor 中執行 `supabase_schema.sql` 檔案中的內容，以建立必要的表格與向量搜尋函式。
+請在 Supabase 的 SQL Editor 中執行 `supabase_schema.sql`，建立必要的 `whitelist`, `spam_patterns`, `violations` 表格與向量函式。
 
-### 2. 環境變數設定
-請在 Cloudflare Workers 控制台或使用 `wrangler secret put` 設定以下環境變數：
+### 2. 環境變數設定 (Cloudflare Workers)
+使用 `wrangler secret put` 或在 Dashboard 設定：
 - `TG_TOKEN`: Telegram Bot Token
 - `GEMINI_API_KEY`: Google Gemini API Key
 - `SUPABASE_URL`: Supabase 專案 URL
 - `SUPABASE_SERVICE_KEY`: Supabase Service Role Key (需具備寫入權限)
-- `FORWARD_CHANNEL_ID`: (選填) 所有訊息轉發紀錄的頻道 ID
+- `FORWARD_CHANNEL_ID`: (選填) 預設的日誌轉發頻道 ID
 
-### 3. 部署至 Cloudflare Workers
+### 3. 部署
 ```bash
 npm install
 npx wrangler deploy
 ```
 
-### 4. 設定 Telegram Webhook
-部署完成後，請造訪以下網址（將括號內容替換為您的資訊）：
-`https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=<YOUR_WORKER_URL>`
+### 4. 啟用 Webhook
+```bash
+https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=<YOUR_WORKER_URL>
+```
 
-## 管理指令
-- `/whitelist`: (管理員用) 回覆某人訊息以將其加入白名單。
-- `/spam`: (管理員用) 回覆廣告訊息以學習模式、紀錄違規並刪除。
-- `/config [key] [value]`: (管理員用) 修改設定。
-  - `threshold`: 封鎖門檻 (預設 3)
-  - `appeal`: 申訴管道說明
-  - `stats_channel`: 統計資料接收頻道 ID
-  - `dry_run`: 演習模式 (true/false)。開啟時不執行刪除與封鎖。
-  - `observation_channel`: 演習模式下的通知與轉發頻道 ID。
+---
+
+## 💻 指令手冊
+
+### 基礎管理
+*   `/ping` - 檢查機器人存活狀態與當前 Chat ID。
+*   `/monitor` - **[開關]** 啟用或暫停對當前群組的廣告監控 (切換制)。
+*   `/whitelist` - (回覆訊息) 將使用者加入白名單，永不標記為 Spam。
+*   `/spam` - (回覆訊息) 手動標記為廣告。機器人會學習此特徵並刪除訊息。
+
+### 系統配置 (/config)
+用法：`/config [key] [value]`
+*   `forward_channel [ID]` - 設定日誌轉發頻道 (例如 `-100xxxx`)。
+*   `threshold [次數]` - 每日違規達幾次後封鎖使用者。
+*   `dry_run [true/false]` - 演習模式。開啟後只會通知觀察頻道，不會實際刪除訊息。
+*   `appeal [文字]` - 設定刪除訊息時顯示的申訴管道資訊。
+
+---
+
+## 🔍 疑難排解 (Troubleshooting)
+
+**Q: 機器人已讀不回？**
+*   檢查是否已在該群組啟用 `/monitor`。
+*   確認機器人是否為管理員 (需有刪除訊息權限)。
+*   檢查隱私模式 (Privacy Mode) 是否已關閉 (需向 @BotFather 設定)。
+
+**Q: 顯示 "API Error"？**
+*   這是正常的備援狀態。機器人會自動嘗試轉發訊息並標記為「暫時放行」，以避免誤殺。
+*   若頻繁出現，請檢查 Google AI Studio 配額或部署新的 API Key。
+
+**Q: 轉發失敗 "Chat not found"？**
+*   請確認轉發頻道的 ID 正確 (開頭通常是 `-100`)。
+*   確認機器人已加入該頻道並擁有發言權限。
