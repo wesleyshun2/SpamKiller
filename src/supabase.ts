@@ -33,6 +33,8 @@ export class DatabaseService {
       stats_channel_id: config.stats_channel_id || null,
       dry_run: config.dry_run === true || config.dry_run === 'true',
       observation_channel_id: config.observation_channel_id || null,
+      forward_channel_id: config.forward_channel_id || null,
+      monitored_groups: Array.isArray(config.monitored_groups) ? config.monitored_groups : [],
     };
   }
 
@@ -105,5 +107,14 @@ export class DatabaseService {
       totalDeleted,
       kickedUsers
     };
+  }
+
+  async getAllWhitelist() {
+    return this.client.from('whitelist').select('user_id, username');
+  }
+
+  async cleanupViolations(days: number = 7) {
+    const limit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    return this.client.from('violations').delete().lt('last_violation', limit);
   }
 }

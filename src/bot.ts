@@ -3,197 +3,338 @@ import { DatabaseService } from './supabase';
 import { GeminiService } from './gemini';
 import { Env } from './types';
 
-export function createBot(env: Env, db: DatabaseService, gemini: GeminiService) {
-  const bot = new Telegraf(env.TG_TOKEN);
+export function createBot(env: Env, db: DatabaseService, gemini: GeminiService, whitelistCache: Map<number, any>) {
+    const bot = new Telegraf(env.TG_TOKEN);
 
-  // 1. 中間層：轉發訊息到頻道
-  bot.on(['message', 'edited_message'], async (ctx, next) => {
-    if (env.FORWARD_CHANNEL_ID) {
-      const msg = (ctx.message || ctx.editedMessage) as any;
-      if (msg && msg.message_id) {
-        try {
-          await ctx.telegram.forwardMessage(env.FORWARD_CHANNEL_ID, ctx.chat.id, msg.message_id);
-        } catch (e) {
-          console.error('Forward failed', e);
+    // 1. 指令區
+    setupCommands(bot, db, gemini, env);
+
+    // 1.1 額外測試指令
+    bot.command('ping', async (ctx) => {
+        await ctx.reply('🏓 Pong! 機器人運作中。\nChat ID: ' + ctx.chat.id + '\nUser ID: ' + ctx.from.id);
+    });
+
+    // 2. 核心 Pipeline
+    bot.on(['message', 'edited_message'], async (ctx: any, next) => {
+        const msg = (ctx.message || ctx.editedMessage) as any;
+        if (!msg || !('text' in msg)) return next();
+
+        // 如果是指令，交給指令處理器 (Telegraf 預設會優先處理 command，但這裡保險起見)
+        if (msg.text?.startsWith('/')) return next();
+
+        console.log(`Processing message from ${msg.from?.id} in chat ${ctx.chat.id}`);
+        if (msg.from?.is_bot) return;
+
+        // [Pre-filter 2] 監控名單檢查
+        const config = (ctx as any).state.config || await db.getConfig();
+        ctx.state.config = config; // 確保 config 在 context 中
+
+        const monitoredGroups = config.monitored_groups || [];
+        const currentChatId = String(ctx.chat.id);
+
+        console.log(`[Monitor Check] Current: ${currentChatId}, List: ${JSON.stringify(monitoredGroups)}`);
+
+        if (!monitoredGroups.includes(currentChatId)) {
+            console.log('[Monitor Check] Result: REJECTED (Not in monitor list)');
+            return;
         }
-      }
-    }
-    return next();
-  });
 
-  // 2. 指令：/whitelist (管理員用)
-  bot.command('whitelist', async (ctx) => {
-    const isAdmin = await checkAdmin(ctx);
-    if (!isAdmin) return;
+        const userId = msg.from.id;
+        const text = msg.text;
 
-    const replyTo = ctx.message.reply_to_message;
-    if (replyTo && replyTo.from) {
-      await db.addToWhitelist(replyTo.from.id, replyTo.from.username);
-      await ctx.reply(`已將 ${replyTo.from.id} 加入白名單`);
-    } else {
-      await ctx.reply('請回覆某人的訊息以將其加入白名單');
-    }
-  });
+        // [Pre-filter 3] 白名單 (Cache First)
+        let isWhitelisted = false;
 
-  // 3. 指令：/spam (管理員回覆舉報)
-  bot.command('spam', async (ctx) => {
-    const isAdmin = await checkAdmin(ctx);
-    if (!isAdmin) return;
+        // A. Check Cache
+        if (whitelistCache.has(userId)) {
+            isWhitelisted = true;
+            console.log(`[Whitelist] Cache Hit: ${userId}`);
+        } else {
+            // B. Check DB
+            const inDb = await db.isWhitelisted(userId);
+            if (inDb) {
+                isWhitelisted = true;
+                whitelistCache.set(userId, { userId, timestamp: Date.now() });
+                console.log(`[Whitelist] DB Hit: ${userId}`);
+            }
+        }
 
-    const replyTo = ctx.message.reply_to_message;
-    if (replyTo && 'text' in replyTo) {
-      const text = replyTo.text || '';
-      const embedding = await gemini.getEmbedding(text);
-      await db.addSpamPattern(text, embedding);
+        if (isWhitelisted) {
+            console.log('[Whitelist] Result: SKIP (User is whitelisted)');
+            return;
+        }
 
-      // 紀錄違規並檢查是否需剔除 (手動舉報也算違規)
-      if (replyTo.from) {
-        await handleSpamAction(ctx, db, env, replyTo.from.id, replyTo.message_id, '管理員手動舉報 (/spam)');
-      }
+        // [Judgment]
+        let isSpam = false;
+        let reason = '';
+        let similarity = 0;
+        let judgmentSource = '';
 
-      // 刪除管理員的指令訊息
-      try {
-        await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id);
-      } catch (e) {}
+        // Step A: Vector Match (Semantic Comparison)
+        const embedding = await gemini.getEmbedding(text);
 
-      await ctx.reply('已學習此廣告模式、紀錄違規並處理訊息');
-    }
-  });
+        if (embedding) {
+            const match = await db.matchSpam(embedding, 0.85); // 向量比對
+            if (match) {
+                isSpam = true;
+                reason = `Vector Match (ID: ${match.id})`;
+                similarity = match.similarity;
+                judgmentSource = 'Vector';
+            }
+        }
 
-  // 4. 指令：/config (管理員用)
-  bot.command('config', async (ctx) => {
-    const isAdmin = await checkAdmin(ctx);
-    if (!isAdmin) return;
+        // Step B: LLM Breakout (Advanced Semantic Analysis)
+        // 若向量庫無匹配，則呼叫 Gemini LLM 進行最終語意判定
+        if (!isSpam && text.length > 5) {
+            let bio = '';
+            try {
+                const chat = await ctx.telegram.getChat(userId);
+                bio = (chat as any).bio || '';
+            } catch (e) { }
 
-    const args = ctx.message.text.split(' ');
-    if (args.length < 3) {
-      await ctx.reply('用法: /config [key] [值]\n' +
-                      '可用 key: threshold, appeal, stats_channel, dry_run, observation_channel\n' +
-                      '例如: /config dry_run true\n' +
-                      '例如: /config observation_channel -100123456789');
-      return;
-    }
+            const llmResult = await gemini.isSpam(text, bio);
+            if (llmResult === true) {
+                isSpam = true;
+                judgmentSource = 'Gemini LLM';
+                reason = 'AI 判定為廣告';
 
-    const key = args[1];
-    const value = args.slice(2).join(' ');
+                // [Auto-Learning] 重點：如果 AI 判定為廣告，且我們有向量，則自動存入資料庫
+                if (embedding) {
+                    try {
+                        await db.addSpamPattern(text, embedding);
+                        console.log('Automated learning: Saved new spam pattern to DB.');
+                    } catch (e) {
+                        console.error('Failed to auto-save spam pattern:', e);
+                    }
+                }
+            } else if (llmResult === false) {
+                isSpam = false;
+                judgmentSource = 'Gemini LLM';
+                reason = 'AI 判定為正常';
+            }
+        }
 
-    if (key === 'threshold') {
-      await db.updateConfig('punishment_threshold', parseInt(value));
-    } else if (key === 'appeal') {
-      await db.updateConfig('appeal_channel', value);
-    } else if (key === 'stats_channel') {
-      await db.updateConfig('stats_channel_id', value);
-    } else if (key === 'dry_run') {
-      await db.updateConfig('dry_run', value === 'true');
-    } else if (key === 'observation_channel') {
-      await db.updateConfig('observation_channel_id', value);
-    }
+        // 判定完成後，如果還是沒抓到但 API 爆了，為了保險我們記錄為 Normal 但標註 API 錯誤
+        if (!isSpam && judgmentSource === '' && text.length > 0) {
+            judgmentSource = `⚠️ API Error (Model: ${gemini.getModelName()})`;
+            reason = 'API 配額已滿或發生錯誤，暫時放行並轉發紀錄。';
+            // Fallback: 雖然是 Normal，但我們希望 Log 顯示為警告
+        }
 
-    await ctx.reply(`配置 ${key} 已更新為 ${value}`);
-  });
+        // [Logging] 判斷後轉發
+        let logChannelId = config.forward_channel_id || env.FORWARD_CHANNEL_ID;
+        if (typeof logChannelId === 'string') logChannelId = logChannelId.trim();
 
-  // 5. 核心邏輯：監測訊息
-  bot.on(['message', 'edited_message'], async (ctx) => {
-    const msg = (ctx.message || ctx.editedMessage) as any;
-    if (!msg || !('text' in msg)) return;
+        // 修正逻辑：如果是 API Error，也必须转发
+        const shouldLog = logChannelId && (isSpam || judgmentSource.includes('API Error') || monitoredGroups.includes(currentChatId));
 
-    const userId = msg.from.id;
-    const text = msg.text;
+        if (shouldLog && logChannelId) {
+            try {
+                // 1. Forward Original
+                const forwarded = await ctx.telegram.forwardMessage(logChannelId, ctx.chat.id, msg.message_id);
 
-    // 白名單檢查
-    if (await db.isWhitelisted(userId)) return;
+                // 2. Send Report (Reply to the forward)
+                const verdictEmoji = isSpam ? 'EX' : 'OK';
+                const report = `[${verdictEmoji}] 判定結果: ${isSpam ? '廣告 (SPAM)' : '正常 (NORMAL)'}\n` +
+                    `分數: ${similarity.toFixed(4)}\n` +
+                    `核心: ${judgmentSource}\n` +
+                    `說明: ${reason}`;
 
-    // 向量檢查 (先做向量檢查，再決定是否拿 Bio，節省 API 呼叫)
-    const embedding = await gemini.getEmbedding(text);
-    const match = await db.matchSpam(embedding, 0.85); // 門檻暫定 0.85
+                await ctx.telegram.sendMessage(logChannelId, report, {
+                    reply_to_message_id: forwarded.message_id
+                });
+            } catch (e: any) {
+                console.error(`Logging failed to channel ${logChannelId}:`, e.message);
 
-    let isSpam = !!match;
+                // 特定處理 Chat not found，可能是 bot 沒加入或 ID 錯誤
+                if (e.message?.includes('chat not found') || e.message?.includes('Bad Request: chat not found')) {
+                    const helpMsg = `⚠️ 轉發失敗：找不到頻道 (${logChannelId})。\n` +
+                        `1. 請確認機器人已加入該頻道並有管理員權限。\n` +
+                        `2. 請確認 ID 是否正確 (是否少了 -100?)`;
+                    try { await ctx.telegram.sendMessage(ctx.chat.id, helpMsg); } catch { }
+                }
 
-    // 如果向量沒中，但文字較長，交給 Gemini 判斷
-    if (!isSpam && text.length > 10) {
-      // 此時才獲取 Bio
-      let bio = '';
-      try {
-        const chat = await ctx.telegram.getChat(userId);
-        bio = (chat as any).bio || '';
-      } catch (e) {}
+                // 自動修正：如果遇到群組升級錯誤，提示使用者更新 ID
+                if (e.message?.includes('group chat was upgraded')) {
+                    const helpMsg = `⚠️ 轉發失敗：轉發頻道 ID (${logChannelId}) 似乎已過期或錯誤（群組已升級）。請取得新的 Channel ID 並使用 /config forward_channel [新ID] 更新。`;
+                    try { await ctx.telegram.sendMessage(ctx.chat.id, helpMsg); } catch { }
+                }
+            }
+        }
 
-      isSpam = await gemini.isSpam(text, bio);
-    }
+        // [Action] 執行處置
+        if (isSpam) {
+            await handleSpamAction(ctx, db, env, userId, msg.message_id, reason);
+        }
+    });
 
-    if (isSpam) {
-      const reason = match ? `向量比對命中 (ID: ${match.id}, 相似度: ${match.similarity.toFixed(4)})` : 'Gemini 語意判定為廣告';
-      await handleSpamAction(ctx, db, env, userId, msg.message_id, reason);
-    }
-  });
+    return bot;
+}
 
-  return bot;
+function setupCommands(bot: any, db: DatabaseService, gemini: GeminiService, env: Env) {
+    // 1.5 指令：/monitor
+    bot.command('monitor', async (ctx: any) => {
+        if (!await checkAdmin(ctx)) return;
+        if (ctx.chat.type === 'private') {
+            await ctx.reply('請在群組中使用。');
+            return;
+        }
+        const config = await db.getConfig();
+        const groups = config.monitored_groups || [];
+        const chatId = String(ctx.chat.id);
+
+        if (groups.includes(chatId)) {
+            await db.updateConfig('monitored_groups', groups.filter(g => g !== chatId));
+            await ctx.reply('🛑 已停止監控。');
+        } else {
+            groups.push(chatId);
+            await db.updateConfig('monitored_groups', groups);
+            await ctx.reply('✅ 已開始監控。');
+        }
+    });
+
+    // 2. 指令：/whitelist
+    bot.command('whitelist', async (ctx: any) => {
+        if (!await checkAdmin(ctx)) return;
+        const replyTo = ctx.message.reply_to_message;
+        if (replyTo && replyTo.from) {
+            await db.addToWhitelist(replyTo.from.id, replyTo.from.username);
+            await ctx.reply(`已將 ${replyTo.from.id} 加入白名單`);
+        } else {
+            await ctx.reply('請回覆訊息以加入白名單');
+        }
+    });
+
+    // 3. 指令：/spam
+    bot.command('spam', async (ctx: any) => {
+        if (!await checkAdmin(ctx)) return;
+        const replyTo = ctx.message.reply_to_message;
+        if (replyTo && 'text' in replyTo) {
+            const text = replyTo.text || '';
+            const embedding = await gemini.getEmbedding(text);
+            if (embedding) {
+                await db.addSpamPattern(text, embedding);
+                await ctx.reply('✅ 已學習此廣告模式');
+            } else {
+                await ctx.reply('⚠️ 無法向量化該訊息，可能 API 配額已滿。');
+            }
+
+            if (replyTo.from) {
+                await handleSpamAction(ctx, db, env, replyTo.from.id, replyTo.message_id, '管理員手動舉報');
+            }
+            try { await ctx.deleteMessage(); } catch { }
+        }
+    });
+
+    // 4. 指令：/config
+    bot.command('config', async (ctx: any) => {
+        if (!await checkAdmin(ctx)) return;
+        // 使用正則表達式 split，避免多個空格造成的問題
+        const args = ctx.message.text.split(/\s+/).filter((s: string) => s.length > 0);
+        if (args.length < 3) {
+            await ctx.reply('用法: /config [key] [value]');
+            return;
+        }
+        const key = args[1];
+        const value = args.slice(2).join(' ').trim(); // 確保去除前後空白
+
+        // 簡單映射
+        const mapping: any = {
+            'threshold': 'punishment_threshold',
+            'appeal': 'appeal_channel',
+            'stats_channel': 'stats_channel_id',
+            'dry_run': 'dry_run',
+            'observation_channel': 'observation_channel_id',
+            'forward_channel': 'forward_channel_id'
+        };
+
+        if (mapping[key]) {
+            let val: any = value;
+            if (key === 'threshold') val = parseInt(value);
+            if (key === 'dry_run') val = (value === 'true');
+
+            await db.updateConfig(mapping[key], val);
+            await ctx.reply(`配置 ${key} 更新為 ${val}`);
+        } else {
+            await ctx.reply('未知設定鍵');
+        }
+    });
 }
 
 async function checkAdmin(ctx: Context) {
-  if (ctx.chat?.type === 'private') return true;
-  const member = await ctx.getChatMember(ctx.from!.id);
-  return ['administrator', 'creator'].includes(member.status);
+    if (ctx.chat?.type === 'private') return true;
+    try {
+        const member = await ctx.getChatMember(ctx.from!.id);
+        const isAdmin = ['administrator', 'creator'].includes(member.status);
+        if (!isAdmin) {
+            await ctx.reply('⚠️ 此指令僅限群組管理員使用。');
+        }
+        return isAdmin;
+    } catch (e) {
+        console.error('CheckAdmin failed', e);
+        await ctx.reply('⚠️ 無法確認權限，請確保機器人具有管理員權限。');
+        return false;
+    }
 }
 
 async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, userId: number, messageId: number, reason: string) {
-  const chatId = ctx.chat!.id;
-  const config = await db.getConfig();
+    const chatId = ctx.chat!.id;
+    const config = (ctx as any).state.config || await db.getConfig();
 
-  if (config.dry_run) {
-    // 演習模式：僅記錄並通知觀察頻道
-    if (config.observation_channel_id) {
-      const report = `🚨 [演習模式] 偵測到疑似廣告\n` +
-                     `來源群組: ${chatId}\n` +
-                     `發言者: ${userId}\n` +
-                     `判定原因: ${reason}\n` +
-                     `預定處分: 刪除訊息並累計違規 (當前若執行應為第 ${(await getEstimatedCount(db, userId, chatId))} 次)`;
+    if (config.dry_run) {
+        // 演習模式：僅記錄並通知觀察頻道
+        if (config.observation_channel_id) {
+            const report = `🚨 [演習模式] 偵測到疑似廣告\n` +
+                `來源群組: ${chatId}\n` +
+                `發言者: ${userId}\n` +
+                `判定原因: ${reason}\n` +
+                `預定處分: 刪除訊息並累計違規 (當前若執行應為第 ${(await getEstimatedCount(db, userId, chatId))} 次)`;
 
-      try {
-        await ctx.telegram.sendMessage(config.observation_channel_id, report);
-        await ctx.telegram.forwardMessage(config.observation_channel_id, chatId, messageId);
-      } catch (e) {
-        console.error('Observation report failed', e);
-      }
+            try {
+                await ctx.telegram.sendMessage(config.observation_channel_id, report);
+                await ctx.telegram.forwardMessage(config.observation_channel_id, chatId, messageId);
+            } catch (e) {
+                console.error('Observation report failed', e);
+            }
+        }
+        return;
     }
-    return;
-  }
 
-  // 正式模式：執行處分
-  // 1. 刪除訊息
-  try {
-    await ctx.telegram.deleteMessage(chatId, messageId);
-  } catch (e) {}
-
-  // 2. 紀錄違規
-  const count = await db.recordViolation(userId, chatId);
-
-  // 3. 通知申訴管道
-  const appealMsg = `您的訊息被判定為廣告已刪除。如有誤刪請連繫：${config.appeal_channel}`;
-  await ctx.reply(appealMsg);
-
-  // 4. 判斷是否剔除
-  if (count >= config.punishment_threshold) {
+    // 正式模式：執行處分
+    // 1. 刪除訊息
     try {
-      await ctx.banChatMember(userId);
-      await ctx.reply(`使用者 ${userId} 因一天內多次違規已被封鎖。`);
-    } catch (e) {
-      console.error('Ban failed', e);
+        await ctx.telegram.deleteMessage(chatId, messageId);
+    } catch (e) { }
+
+    // 2. 紀錄違規
+    const count = await db.recordViolation(userId, chatId);
+
+    // 3. 通知申訴管道
+    const appealMsg = `您的訊息被判定為廣告已刪除。如有誤刪請連繫：${config.appeal_channel}`;
+    await ctx.reply(appealMsg);
+
+    // 4. 判斷是否剔除
+    if (count >= config.punishment_threshold) {
+        try {
+            await ctx.banChatMember(userId);
+            await ctx.reply(`使用者 ${userId} 因一天內多次違規已被封鎖。`);
+        } catch (e) {
+            console.error('Ban failed', e);
+        }
     }
-  }
 }
 
 async function getEstimatedCount(db: DatabaseService, userId: number, chatId: number): Promise<number> {
-  // 這裡只是估計值，不實際寫入資料庫
-  const { data } = await (db as any).client
-    .from('violations')
-    .select('count, last_violation')
-    .eq('user_id', userId)
-    .eq('chat_id', chatId)
-    .single();
+    // 這裡只是估計值，不實際寫入資料庫
+    const { data } = await (db as any).client
+        .from('violations')
+        .select('count, last_violation')
+        .eq('user_id', userId)
+        .eq('chat_id', chatId)
+        .single();
 
-  if (!data) return 1;
-  const last = new Date(data.last_violation);
-  const diff24h = (Date.now() - last.getTime()) < 24 * 60 * 60 * 1000;
-  return diff24h ? data.count + 1 : 1;
+    if (!data) return 1;
+    const last = new Date(data.last_violation);
+    const diff24h = (Date.now() - last.getTime()) < 24 * 60 * 60 * 1000;
+    return diff24h ? data.count + 1 : 1;
 }
