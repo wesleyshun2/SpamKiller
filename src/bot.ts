@@ -135,14 +135,17 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService, 
                 const forwarded = await ctx.telegram.forwardMessage(logChannelId, ctx.chat.id, msg.message_id);
 
                 // 2. Send Report (Reply to the forward)
-                const verdictEmoji = isSpam ? 'EX' : 'OK';
-                const report = `[${verdictEmoji}] 判定結果: ${isSpam ? '廣告 (SPAM)' : '正常 (NORMAL)'}\n` +
-                    `分數: ${similarity.toFixed(4)}\n` +
-                    `核心: ${judgmentSource}\n` +
-                    `說明: ${reason}`;
+                const verdictEmoji = isSpam ? '❌' : '✅';
+                const embedModelStatus = embedding ? `✓ 已向量化 (${gemini.getEmbeddingModel()})` : '✗ 無向量';
+                const report = `${verdictEmoji} **判定結果**: ${isSpam ? '廣告 (SPAM)' : '正常 (NORMAL)'}\n` +
+                    `📊 **相似度**: ${similarity.toFixed(4)}\n` +
+                    `🧠 **判斷來源**: ${judgmentSource}\n` +
+                    `📝 **詳細說明**: ${reason}\n` +
+                    `🔧 **嵌入模型**: ${embedModelStatus}`;
 
                 await ctx.telegram.sendMessage(logChannelId, report, {
-                    reply_to_message_id: forwarded.message_id
+                    reply_to_message_id: forwarded.message_id,
+                    parse_mode: 'Markdown'
                 });
             } catch (e: any) {
                 console.error(`Logging failed to channel ${logChannelId}:`, e.message);
@@ -227,17 +230,59 @@ function setupCommands(bot: any, db: DatabaseService, gemini: GeminiService, env
         }
     });
 
+    // 3.1 指令：/normal (標記為正常訊息以改善向量資料庫)
+    bot.command('normal', async (ctx: any) => {
+        if (!await checkAdmin(ctx)) return;
+        const replyTo = ctx.message.reply_to_message;
+        if (replyTo && 'text' in replyTo) {
+            const text = replyTo.text || '';
+            const embedding = await gemini.getEmbedding(text);
+            if (embedding) {
+                // 存至資料庫作為正常訊息参考（區分廣告與正常）
+                // 目前將其存至 spam_patterns 表的 use_count = -1 以區分
+                const { error } = await db.addNormalPattern(text, embedding);
+                if (!error) {
+                    await ctx.reply('✅ 已學習此正常訊息特徵');
+                } else {
+                    await ctx.reply('⚠️ 保存失敗');
+                }
+            } else {
+                await ctx.reply('⚠️ 無法向量化該訊息，可能 API 配額已滿。');
+            }
+            try { await ctx.deleteMessage(); } catch { }
+        }
+    });
+
     // 4. 指令：/config
     bot.command('config', async (ctx: any) => {
         if (!await checkAdmin(ctx)) return;
         // 使用正則表達式 split，避免多個空格造成的問題
         const args = ctx.message.text.split(/\s+/).filter((s: string) => s.length > 0);
+        
+        // 無參數：顯示當前配置
         if (args.length < 3) {
-            await ctx.reply('用法: /config [key] [value]');
+            const config = await db.getConfig();
+            const helpMsg = `⚙️ **當前配置**：
+• 懲罰閾值: ${config.punishment_threshold} 次違規後封鎖
+• 申訴管道: ${config.appeal_channel}
+• 轉發頻道: ${config.forward_channel_id || '未設定'}
+• 控制頻道: ${config.control_channel_id || '未設定 (預設全部)'}
+• 乾運行模式: ${config.dry_run ? '開啟' : '關閉'}
+
+用法: /config [key] [value]
+
+**可設定的鍵值**:
+• \`threshold [次數]\` - 設定懲罰閾值
+• \`appeal [文字]\` - 設定申訴管道信息
+• \`forward_channel [ID]\` - 設定轉發頻道 (例: -100123456)
+• \`control_channel [ID]\` - 設定控制頻道 (僅該頻道可執行命令)
+• \`dry_run [true/false]\` - 設定乾運行模式`;
+            await ctx.reply(helpMsg, { parse_mode: 'Markdown' });
             return;
         }
+        
         const key = args[1];
-        const value = args.slice(2).join(' ').trim(); // 確保去除前後空白
+        const value = args.slice(2).join(' ').trim();
 
         // 簡單映射
         const mapping: any = {
@@ -246,7 +291,8 @@ function setupCommands(bot: any, db: DatabaseService, gemini: GeminiService, env
             'stats_channel': 'stats_channel_id',
             'dry_run': 'dry_run',
             'observation_channel': 'observation_channel_id',
-            'forward_channel': 'forward_channel_id'
+            'forward_channel': 'forward_channel_id',
+            'control_channel': 'control_channel_id'
         };
 
         if (mapping[key]) {
@@ -255,9 +301,9 @@ function setupCommands(bot: any, db: DatabaseService, gemini: GeminiService, env
             if (key === 'dry_run') val = (value === 'true');
 
             await db.updateConfig(mapping[key], val);
-            await ctx.reply(`配置 ${key} 更新為 ${val}`);
+            await ctx.reply(`✅ 配置 \`${key}\` 已更新為 \`${val}\``, { parse_mode: 'Markdown' });
         } else {
-            await ctx.reply('未知設定鍵');
+            await ctx.reply('❌ 未知設定鍵。請輸入 `/config` 查看幫助', { parse_mode: 'Markdown' });
         }
     });
 }

@@ -34,6 +34,7 @@ export class DatabaseService {
       dry_run: config.dry_run === true || config.dry_run === 'true',
       observation_channel_id: config.observation_channel_id || null,
       forward_channel_id: config.forward_channel_id || null,
+      control_channel_id: config.control_channel_id || null,
       monitored_groups: Array.isArray(config.monitored_groups) ? config.monitored_groups : [],
     };
   }
@@ -63,6 +64,24 @@ export class DatabaseService {
     return this.client.from('spam_patterns').insert({ content, embedding });
   }
 
+  async addNormalPattern(content: string, embedding: number[]) {
+    // 檢查是否已有極度相似的正常模式
+    const { data, error: matchError } = await this.client.rpc('match_normal_patterns', {
+      query_embedding: embedding,
+      match_threshold: 0.95,
+      match_count: 1,
+    });
+
+    if (!matchError && data && data.length > 0) {
+      return this.client
+        .from('normal_patterns')
+        .update({ use_count: (data[0].use_count || 1) + 1 })
+        .eq('id', data[0].id);
+    }
+
+    return this.client.from('normal_patterns').insert({ content, embedding });
+  }
+
   async recordViolation(userId: number, chatId: number, reason: string = 'Spam detected'): Promise<number> {
     // 1. Insert new violation log
     const { error: insertError } = await this.client.from('violation_logs').insert({
@@ -73,11 +92,9 @@ export class DatabaseService {
 
     if (insertError) {
       console.error('Failed to insert violation log:', insertError);
-      // Fallback: if insert fails, we might still want to try to count or just return a safe value
-      // But usually if insert fails, count might fail too.
     }
 
-    // 2. Count violations in the last 24 hours
+    // 2. Count violations in the last 24 hours (across all chats for this user)
     const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
     const { count, error: countError } = await this.client
@@ -92,7 +109,9 @@ export class DatabaseService {
       return 1; // Fallback
     }
 
-    return count || 0;
+    const violationCount = (count || 0) + 1;
+    console.log(`[Violation Count] UserId: ${userId}, ChatId: ${chatId}, 24h Violations: ${violationCount}`);
+    return violationCount;
   }
 
   async getDailyStats(threshold: number = 3) {
@@ -105,27 +124,48 @@ export class DatabaseService {
       .gt('created_at', yesterday);
 
     // 找出達到封鎖門檻的使用者
-    // 這需要 aggregation，Supabase client 比較難直接做 group by having count > x
-    // 為了簡單起見，我們先抓取所有 logs 然後在 JS 處理 (若量大建議改用 RPC)
+    // 按 user_id + chat_id 進行分組計數
     const { data: logs } = await this.client
       .from('violation_logs')
-      .select('user_id')
+      .select('user_id, chat_id')
       .gt('created_at', yesterday);
 
-    const userCounts = new Map<number, number>();
+    const userChatCounts = new Map<string, number>();
     logs?.forEach(log => {
-      const current = userCounts.get(log.user_id) || 0;
-      userCounts.set(log.user_id, current + 1);
+      const key = `${log.user_id}_${log.chat_id}`;
+      const current = userChatCounts.get(key) || 0;
+      userChatCounts.set(key, current + 1);
     });
 
-    const kickedUsers = Array.from(userCounts.entries())
+    const kickedUsers = Array.from(userChatCounts.entries())
       .filter(([_, count]) => count >= threshold)
-      .map(([userId]) => userId);
+      .map(([key]) => {
+        const [userId] = key.split('_');
+        return parseInt(userId);
+      });
 
     return {
       totalDeleted: totalDeleted || 0,
-      kickedUsers
+      kickedUsers: [...new Set(kickedUsers)] // 去重（同一用戶可能在多個群組被踢）
     };
+  }
+
+  async getViolationCountForUser(userId: number, chatId: number, hoursBack: number = 24): Promise<number> {
+    const timeAgo = new Date(Date.now() - hoursBack * 60 * 60 * 1000).toISOString();
+
+    const { count, error } = await this.client
+      .from('violation_logs')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('chat_id', chatId)
+      .gt('created_at', timeAgo);
+
+    if (error) {
+      console.error('Failed to get violation count:', error);
+      return 0;
+    }
+
+    return count || 0;
   }
 
   async getAllWhitelist() {

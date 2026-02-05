@@ -13,6 +13,7 @@ export interface Config {
   dry_run: boolean;
   observation_channel_id: string | null;
   forward_channel_id: string | null;
+  control_channel_id: string | null;
   monitored_groups: string[];
 }
 

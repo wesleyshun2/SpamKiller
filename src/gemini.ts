@@ -23,6 +23,10 @@ export class GeminiService {
     return this.currentTextModel;
   }
 
+  getEmbeddingModel(): string {
+    return this.currentEmbedModel;
+  }
+
   async getEmbedding(text: string): Promise<number[] | null> {
     for (const modelName of this.embedModels) {
       try {
