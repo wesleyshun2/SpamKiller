@@ -77,3 +77,14 @@ begin
   limit match_count;
 end;
 $$;
+
+-- 6. 違規紀錄日誌表格 (Log-based tracking)
+create table if not exists violation_logs (
+    id uuid default gen_random_uuid() primary key,
+    user_id bigint not null,
+    chat_id bigint not null,
+    reason text,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+alter table violation_logs enable row level security;
+create index if not exists violation_logs_idx on violation_logs (user_id, chat_id, created_at);

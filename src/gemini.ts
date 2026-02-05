@@ -5,15 +5,10 @@ export class GeminiService {
 
   // 候選模型清單 (優先嘗試較新的)
   private readonly textModels = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite-preview-02-05", // 加入最新 2.0 Lite
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-pro-latest",
-    "gemini-pro"
+    "gemini-2.5-flash-lite",
+    "gemma-3-4b-it"
   ];
-  private readonly embedModels = ["text-embedding-004", "embedding-001"];
+  private readonly embedModels = ["gemini-embedding-001", "text-embedding-004"];
 
   private currentTextModel: string;
   private currentEmbedModel: string;

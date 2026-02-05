@@ -63,48 +63,67 @@ export class DatabaseService {
     return this.client.from('spam_patterns').insert({ content, embedding });
   }
 
-  async recordViolation(userId: number, chatId: number): Promise<number> {
-    const { data: existing } = await this.client
-      .from('violations')
-      .select('count, last_violation')
-      .eq('user_id', userId)
-      .eq('chat_id', chatId)
-      .single();
-
-    const now = new Date();
-    let count = 1;
-
-    if (existing) {
-      const last = new Date(existing.last_violation);
-      const diff24h = (now.getTime() - last.getTime()) < 24 * 60 * 60 * 1000;
-      count = diff24h ? existing.count + 1 : 1;
-    }
-
-    await this.client.from('violations').upsert({
+  async recordViolation(userId: number, chatId: number, reason: string = 'Spam detected'): Promise<number> {
+    // 1. Insert new violation log
+    const { error: insertError } = await this.client.from('violation_logs').insert({
       user_id: userId,
       chat_id: chatId,
-      count,
-      last_violation: now.toISOString(),
+      reason: reason
     });
 
-    return count;
+    if (insertError) {
+      console.error('Failed to insert violation log:', insertError);
+      // Fallback: if insert fails, we might still want to try to count or just return a safe value
+      // But usually if insert fails, count might fail too.
+    }
+
+    // 2. Count violations in the last 24 hours
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const { count, error: countError } = await this.client
+      .from('violation_logs')
+      .select('*', { count: 'exact', head: true }) // count only
+      .eq('user_id', userId)
+      .eq('chat_id', chatId)
+      .gt('created_at', oneDayAgo);
+
+    if (countError) {
+      console.error('Failed to count violations:', countError);
+      return 1; // Fallback
+    }
+
+    return count || 0;
   }
 
   async getDailyStats(threshold: number = 3) {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
 
-    // 統計刪除總數
-    // 我們可以從 violations 累加
-    const { data: violations } = await this.client
-      .from('violations')
-      .select('user_id, count')
-      .gt('last_violation', yesterday);
+    // 統計今日（24h內）刪除總數
+    const { count: totalDeleted } = await this.client
+      .from('violation_logs')
+      .select('*', { count: 'exact', head: true })
+      .gt('created_at', yesterday);
 
-    const totalDeleted = violations?.reduce((acc, curr) => acc + curr.count, 0) || 0;
-    const kickedUsers = violations?.filter(v => v.count >= threshold).map(v => v.user_id) || [];
+    // 找出達到封鎖門檻的使用者
+    // 這需要 aggregation，Supabase client 比較難直接做 group by having count > x
+    // 為了簡單起見，我們先抓取所有 logs 然後在 JS 處理 (若量大建議改用 RPC)
+    const { data: logs } = await this.client
+      .from('violation_logs')
+      .select('user_id')
+      .gt('created_at', yesterday);
+
+    const userCounts = new Map<number, number>();
+    logs?.forEach(log => {
+      const current = userCounts.get(log.user_id) || 0;
+      userCounts.set(log.user_id, current + 1);
+    });
+
+    const kickedUsers = Array.from(userCounts.entries())
+      .filter(([_, count]) => count >= threshold)
+      .map(([userId]) => userId);
 
     return {
-      totalDeleted,
+      totalDeleted: totalDeleted || 0,
       kickedUsers
     };
   }
@@ -115,6 +134,6 @@ export class DatabaseService {
 
   async cleanupViolations(days: number = 7) {
     const limit = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    return this.client.from('violations').delete().lt('last_violation', limit);
+    return this.client.from('violation_logs').delete().lt('created_at', limit);
   }
 }

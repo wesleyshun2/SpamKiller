@@ -95,7 +95,7 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService, 
             const llmResult = await gemini.isSpam(text, bio);
             if (llmResult === true) {
                 isSpam = true;
-                judgmentSource = 'Gemini LLM';
+                judgmentSource = `Gemini LLM (${gemini.getModelName()})`;
                 reason = 'AI 判定為廣告';
 
                 // [Auto-Learning] 重點：如果 AI 判定為廣告，且我們有向量，則自動存入資料庫
@@ -109,7 +109,7 @@ export function createBot(env: Env, db: DatabaseService, gemini: GeminiService, 
                 }
             } else if (llmResult === false) {
                 isSpam = false;
-                judgmentSource = 'Gemini LLM';
+                judgmentSource = `Gemini LLM (${gemini.getModelName()})`;
                 reason = 'AI 判定為正常';
             }
         }
@@ -308,7 +308,7 @@ async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, use
     } catch (e) { }
 
     // 2. 紀錄違規
-    const count = await db.recordViolation(userId, chatId);
+    const count = await db.recordViolation(userId, chatId, reason);
 
     // 3. 通知申訴管道
     const appealMsg = `您的訊息被判定為廣告已刪除。如有誤刪請連繫：${config.appeal_channel}`;
@@ -327,15 +327,13 @@ async function handleSpamAction(ctx: Context, db: DatabaseService, env: Env, use
 
 async function getEstimatedCount(db: DatabaseService, userId: number, chatId: number): Promise<number> {
     // 這裡只是估計值，不實際寫入資料庫
-    const { data } = await (db as any).client
-        .from('violations')
-        .select('count, last_violation')
+    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count } = await (db as any).client
+        .from('violation_logs')
+        .select('*', { count: 'exact', head: true })
         .eq('user_id', userId)
         .eq('chat_id', chatId)
-        .single();
+        .gt('created_at', oneDayAgo);
 
-    if (!data) return 1;
-    const last = new Date(data.last_violation);
-    const diff24h = (Date.now() - last.getTime()) < 24 * 60 * 60 * 1000;
-    return diff24h ? data.count + 1 : 1;
+    return (count || 0) + 1;
 }
