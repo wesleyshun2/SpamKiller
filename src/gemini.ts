@@ -8,7 +8,7 @@ export class GeminiService {
     "gemini-2.5-flash-lite",
     "gemma-3-4b-it"
   ];
-  private readonly embedModels = ["gemini-embedding-001", "text-embedding-004"];
+  private readonly embedModels = ["gemini-embedding-001"];
 
   private currentTextModel: string;
   private currentEmbedModel: string;
