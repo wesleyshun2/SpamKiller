@@ -28,31 +28,107 @@ export class GeminiService {
   }
 
   async getEmbedding(text: string): Promise<number[] | null> {
+    if (!text || text.trim().length === 0) {
+      console.warn('⚠️ 無法嵌入空文本');
+      return null;
+    }
+
+    console.log(`[嵌入請求] 文本長度: ${text.length}`);
+    
+    const TARGET_DIM = 768;
     for (const modelName of this.embedModels) {
       try {
-        // 先嘗試預設 v1beta
+        console.log(`[嵌入請求] 嘗試模型: ${modelName}`);
         const model = this.genAI.getGenerativeModel({ model: modelName });
-        const result = await model.embedContent(text);
+        // 優先使用 top-level models.embedContent API（支援 outputDimensionality），若不可用再 fallback
+        let result: any;
+        if (this.genAI && (this.genAI as any).models && typeof (this.genAI as any).models.embedContent === 'function') {
+          result = await (this.genAI as any).models.embedContent({ model: modelName, content: text, outputDimensionality: TARGET_DIM });
+        } else {
+          // fallback: legacy model instance method (可能只接受 text string)
+          result = await model.embedContent ? await model.embedContent(text) : null;
+        }
+        
+        if (!result.embedding || !result.embedding.values) {
+          console.warn(`⚠️ 嵌入結果無數據`);
+          continue;
+        }
+
+        const embeddingValues = result.embedding.values;
         this.currentEmbedModel = modelName;
-        return result.embedding.values;
+
+        // 如果模型已回傳正確維度，直接做 L2 正規化以確保向量長度為 1
+        const normalized = this.resizeAndNormalizeEmbedding(embeddingValues, TARGET_DIM);
+        console.log(`✅ 嵌入成功 (原始維度: ${embeddingValues.length} -> 使用維度: ${normalized.length})`);
+        return normalized;
       } catch (e: any) {
         if (this.isNotFoundError(e)) {
-          // 如果 404，嘗試強制使用 v1
           try {
+            console.log(`[嵌入請求] 嘗試 v1 API: ${modelName}`);
             const modelV1 = this.genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
-            const result = await modelV1.embedContent(text);
+            let resultV1: any;
+            if (this.genAI && (this.genAI as any).models && typeof (this.genAI as any).models.embedContent === 'function') {
+              resultV1 = await (this.genAI as any).models.embedContent({ model: modelName, content: text, outputDimensionality: TARGET_DIM, apiVersion: 'v1' });
+            } else {
+              resultV1 = await modelV1.embedContent ? await modelV1.embedContent(text) : null;
+            }
+            
+            if (!resultV1 || !resultV1.embedding || !resultV1.embedding.values) {
+              console.warn(`⚠️ v1 嵌入結果無數據`);
+              continue;
+            }
+
+            const embeddingValues = resultV1.embedding.values;
             this.currentEmbedModel = modelName;
-            return result.embedding.values;
+            const normalized = this.resizeAndNormalizeEmbedding(embeddingValues, TARGET_DIM);
+            console.log(`✅ 嵌入成功 (v1 API, 原始維度: ${embeddingValues.length} -> 使用維度: ${normalized.length})`);
+            return normalized;
           } catch (e2: any) {
-            console.warn(`Embedding failed with ${modelName} on both v1beta & v1: ${e2.message}`);
+            console.warn(`❌ v1 API 失敗: ${e2.message}`);
           }
         }
-        console.warn(`Embedding failed with ${modelName}:`, e.message);
+        console.warn(`❌ 嵌入失敗: ${e.message}`);
         if (this.isPermanentError(e)) continue;
         return null;
       }
     }
+    
+    console.error('❌ 所有嵌入模型都失敗');
     return null;
+  }
+
+  private resizeAndNormalizeEmbedding(vec: number[], targetDim: number): number[] {
+    if (!vec || vec.length === 0) return [];
+    const n = vec.length;
+    let out: number[] = new Array(targetDim).fill(0);
+
+    if (n === targetDim) {
+      out = vec.slice();
+    } else if (n > targetDim) {
+      // Downsample by averaging ranges that map to each target index
+      for (let i = 0; i < targetDim; i++) {
+        const start = Math.floor((i * n) / targetDim);
+        let end = Math.floor(((i + 1) * n) / targetDim);
+        if (end <= start) end = Math.min(start + 1, n);
+        let sum = 0;
+        let count = 0;
+        for (let j = start; j < end && j < n; j++) {
+          sum += vec[j];
+          count++;
+        }
+        out[i] = count > 0 ? sum / count : 0;
+      }
+    } else {
+      // n < targetDim: copy and pad with zeros
+      for (let i = 0; i < n; i++) out[i] = vec[i];
+      for (let i = n; i < targetDim; i++) out[i] = 0;
+    }
+
+    // L2 normalize
+    let norm = Math.sqrt(out.reduce((acc, v) => acc + v * v, 0));
+    if (norm === 0) return out;
+    out = out.map((v) => v / norm);
+    return out;
   }
 
   async isSpam(text: string, bio: string): Promise<boolean | null> {

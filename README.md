@@ -25,7 +25,9 @@
 ## 🛠️ 部署說明
 
 ### 1. 資料庫設定 (Supabase)
-請在 Supabase 的 SQL Editor 中執行 `supabase_schema.sql`，建立必要的 `whitelist`, `spam_patterns`, `violations` 表格與向量函式。
+如果你尚未初始化資料庫，請在 Supabase 的 SQL Editor 中執行 `supabase_schema.sql`，建立必要的表格與向量函式（包含 `whitelist`, `spam_patterns`, `normal_patterns`, `violation_logs` 及相關 RPC）。
+
+已移除臨時遷移與初始化腳本，若你已經由我或其他方式完成資料庫初始化，則可跳過此步驟。
 
 ### 2. 環境變數設定 (Cloudflare Workers)
 使用 `wrangler secret put` 或在 Dashboard 設定：
@@ -37,7 +39,10 @@
 
 ### 3. 部署
 ```bash
+# 安裝依賴
 npm install
+
+# 部署到 Cloudflare Workers
 npx wrangler deploy
 ```
 
@@ -62,20 +67,3 @@ https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=<YOUR_WORKER_URL>
 *   `threshold [次數]` - 每日違規達幾次後封鎖使用者。
 *   `dry_run [true/false]` - 演習模式。開啟後只會通知觀察頻道，不會實際刪除訊息。
 *   `appeal [文字]` - 設定刪除訊息時顯示的申訴管道資訊。
-
----
-
-## 🔍 疑難排解 (Troubleshooting)
-
-**Q: 機器人已讀不回？**
-*   檢查是否已在該群組啟用 `/monitor`。
-*   確認機器人是否為管理員 (需有刪除訊息權限)。
-*   檢查隱私模式 (Privacy Mode) 是否已關閉 (需向 @BotFather 設定)。
-
-**Q: 顯示 "API Error"？**
-*   這是正常的備援狀態。機器人會自動嘗試轉發訊息並標記為「暫時放行」，以避免誤殺。
-*   若頻繁出現，請檢查 Google AI Studio 配額或部署新的 API Key。
-
-**Q: 轉發失敗 "Chat not found"？**
-*   請確認轉發頻道的 ID 正確 (開頭通常是 `-100`)。
-*   確認機器人已加入該頻道並擁有發言權限。

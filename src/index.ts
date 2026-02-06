@@ -37,7 +37,15 @@ export default {
       }
     }
 
-    return new Response('TG Bot is running');
+    return new Response(JSON.stringify({
+      status: 'running',
+      message: 'SpamKiller Bot is operational',
+      timestamp: new Date().toISOString(),
+      note: 'Use /help in Telegram to see available commands'
+    }, null, 2), { 
+      status: 200, 
+      headers: { 'Content-Type': 'application/json' } 
+    });
   },
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext) {

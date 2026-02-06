@@ -9,6 +9,11 @@ create table if not exists whitelist (
 );
 alter table whitelist enable row level security;
 
+-- RLS 政策：允許 Service Role 存取
+create policy "Allow service role access whitelist" on whitelist
+  for all using (true)
+  with check (true);
+
 -- 2. 廣告特徵向量表格
 create table if not exists spam_patterns (
     id uuid default gen_random_uuid() primary key,
@@ -18,6 +23,11 @@ create table if not exists spam_patterns (
     use_count int default 1
 );
 alter table spam_patterns enable row level security;
+
+-- RLS 政策：允許 Service Role 存取（Cloudflare Workers 使用）
+create policy "Allow service role access spam_patterns" on spam_patterns
+  for all using (true)
+  with check (true);
 
 -- 建立向量索引以加速搜尋
 create index on spam_patterns using ivfflat (embedding vector_cosine_ops)
@@ -33,6 +43,11 @@ create table if not exists normal_patterns (
 );
 alter table normal_patterns enable row level security;
 
+-- RLS 政策：允許 Service Role 存取
+create policy "Allow service role access normal_patterns" on normal_patterns
+  for all using (true)
+  with check (true);
+
 -- 建立向量索引以加速搜尋
 create index on normal_patterns using ivfflat (embedding vector_cosine_ops)
 with (lists = 100);
@@ -44,6 +59,11 @@ create table if not exists config (
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 alter table config enable row level security;
+
+-- RLS 政策：允許 Service Role 存取
+create policy "Allow service role access config" on config
+  for all using (true)
+  with check (true);
 
 -- 初始化預設設定
 insert into config (key, value) values
@@ -124,6 +144,11 @@ create table if not exists violation_logs (
     created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 alter table violation_logs enable row level security;
+
+-- RLS 政策：允許 Service Role 存取
+create policy "Allow service role access violation_logs" on violation_logs
+  for all using (true)
+  with check (true);
 
 -- 建立高效查詢索引
 create index if not exists violation_logs_user_chat_idx 
