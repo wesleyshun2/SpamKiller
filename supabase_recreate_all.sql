@@ -1,6 +1,6 @@
 -- supabase_recreate_all.sql
--- WARNING: This script DROPS existing schema objects and RECREATES them from scratch.
--- You said you already backed up your data. Only run if you are ready to wipe and rebuild.
+-- WARNING: This script Deletes existing schema objects and RECREATES them from scratch.
+-- MAKE SURE you have backed up your data. Only run if you are ready to wipe and rebuild.
 
 -- Drop known functions and tables (safe with IF EXISTS)
 DROP FUNCTION IF EXISTS match_spam_patterns CASCADE;
