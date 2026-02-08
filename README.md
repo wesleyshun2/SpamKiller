@@ -4,15 +4,13 @@
 目前小型群組可以在免費額度內正常運作。
 
 ### 串接服務
-Cloudflare Workers - 無伺服後端
-Supabase - 資料庫
-Google Ai Studio - 模型
-  - 向量化: `gemini-embedding-001`
-  - LLM: `gemini-2.5-flash-lite` (額度用盡) -> `gemma-3-4b-it` 
-
+無伺服後端 - Cloudflare Workers
+資料庫 - Supabase
+模型 - Google Ai Studio
+	- 向量化: `gemini-embedding-001`
+	- LLM: `gemini-2.5-flash-lite` -(額度用盡)-> `gemma-3-4b-it` 
 
 ### 🌟 核心特色
-
 1.  **雙重自動判斷機制**：
     *   **第一層 向量化語意比對**：利用向量化模型將 TG 訊息向量，再與已知廣告的資料庫比對，相似度達到門檻即攔截。
     *   **第二層 (LLM Analysis)**：若向量庫無匹配，就會調用 LLM 進行文本判斷。
@@ -21,6 +19,7 @@ Google Ai Studio - 模型
 3.  **白名單**：在白名單內的使用者發文不受影響。
 4.  **黑名單**：違規次數累計達設定門檻使用者就會被封鎖。
 5.  **分離日誌回報**：機器人報告與討論區分離，不會干擾正常聊天。
+
 
 --- 尚未完工 ---
 ## 🛠️ 部署說明
