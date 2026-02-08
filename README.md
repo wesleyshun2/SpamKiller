@@ -21,6 +21,7 @@
 5.  **分離日誌回報**：機器人報告與討論區分離，不會干擾正常聊天。
 
 ![運作效果](https://github.com/wesleyshun2/SpamKiller/blob/feature/spam-filter-bot-17393556700575127669/%E6%A9%9F%E5%99%A8%E4%BA%BA%E6%95%88%E6%9E%9C%E6%88%AA%E5%9C%96.png)
+
 --- 尚未完工 ---
 ## 🛠️ 部署說明
 
